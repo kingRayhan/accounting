@@ -1,120 +1,169 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Get,
   NotFoundException,
   Param,
-  Patch,
   Post,
   Query,
 } from '@nestjs/common';
 import { DatabaseService } from '../common/database/database.service';
-import { CreateContactDto, UpdateContactDto } from './contact.dto';
+import { AccountTransactionDto, CreateAccountDto } from './account.dto';
 
-@Controller('contacts')
-export class ContactController {
+@Controller('accounts')
+export class AccountController {
   constructor(private readonly dbService: DatabaseService) {}
 
-  @Get(':type')
-  async getContacts(
-    @Param('type') type: string,
-    @Query('page') page: number = 1,
-    @Query('limit') limit: number = 50,
-  ) {
-    if (!['customer', 'vendor'].includes(type)) {
-      throw new BadRequestException('Type must be either customer or vendor');
+  @Get()
+  async getAccounts(@Query('type') type?: string) {
+    let query = `SELECT *,
+      (select sum(amount) from account_transactions where account_id = accounts.id) as balance
+      FROM accounts WHERE is_active = true ORDER BY name
+    `;
+    const params: any[] = [];
+
+    if (type) {
+      query = `
+      SELECT *,
+        (select sum(amount) from account_transactions where account_id = accounts.id) as balance,
+        FROM accounts WHERE is_active = true AND account_type = $1 ORDER BY name`;
+      params.push(type);
     }
 
-    const offset = (page - 1) * limit;
+    const result = await this.dbService.query(query, params);
+    return { data: result.rows };
+  }
 
-    const result = await this.dbService.query(
-      `SELECT * FROM contacts 
-       WHERE type = $1 
-       ORDER BY created_at DESC 
-       LIMIT $2 OFFSET $3`,
-      [type, limit, offset],
-    );
+  @Post()
+  async createAccount(@Body() payload: CreateAccountDto) {
+    const initialBalance = payload.initial_balance || 0;
 
-    const countResult = await this.dbService.query(
-      'SELECT COUNT(*) FROM contacts WHERE type = $1',
-      [type],
-    );
-
-    return {
-      data: result.rows,
-      pagination: {
-        page: parseInt(page.toString()),
-        limit: parseInt(limit.toString()),
-        total: parseInt(countResult.rows[0].count),
-        totalPages: Math.ceil(countResult.rows[0].count / limit),
+    const queries: any[] = [
+      {
+        text: `INSERT INTO accounts (name, account_type, account_subtype) 
+               VALUES ($1, $2, $3) 
+               RETURNING *`,
+        params: [payload.name, payload.account_type, payload.account_subtype],
       },
+    ];
+
+    // If there's an initial balance, create a transaction record
+    if (initialBalance !== 0) {
+      queries.push({
+        text: `INSERT INTO account_transactions (account_id, transaction_type, amount, description, transaction_date)
+               VALUES ((SELECT id FROM accounts WHERE name = $1), $2, $3, $4, CURRENT_DATE)`,
+        params: [
+          payload.name,
+          initialBalance > 0 ? 'deposit' : 'withdrawal',
+          initialBalance,
+          'Initial balance',
+        ],
+      });
+    }
+
+    const results = await this.dbService.transaction(queries);
+    return {
+      message: 'Account created successfully',
+      data: results.map((r) => r.rows),
     };
   }
 
-  @Post(':type')
-  async createContact(
-    @Param('type') type: string,
-    @Body() payload: CreateContactDto,
+  @Post('transactions')
+  async createAccountTransaction(
+    @Body() transactionDto: AccountTransactionDto,
   ) {
-    if (!['customer', 'vendor'].includes(type)) {
-      throw new BadRequestException('Type must be either customer or vendor');
-    }
-
-    const result = await this.dbService.query(
-      `INSERT INTO contacts (name, email, phone, address, type) 
-       VALUES ($1, $2, $3, $4, $5) 
-       RETURNING *`,
-      [payload.name, payload.email, payload.phone, payload.address, type],
+    // Verify account exists
+    const accountResult = await this.dbService.query(
+      'SELECT * FROM accounts WHERE id = $1',
+      [transactionDto.account_id],
     );
 
-    return { message: 'Contact created successfully', data: result.rows[0] };
+    if (accountResult.rows.length === 0) {
+      throw new NotFoundException('Account not found');
+    }
+
+    const transactionAmount = parseFloat(transactionDto.amount.toString());
+
+    const results = await this.dbService.query(
+      `INSERT INTO account_transactions (account_id, transaction_type, amount, description, reference_number, transaction_date)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               RETURNING *`,
+      [
+        transactionDto.account_id,
+        transactionDto.transaction_type,
+        transactionAmount,
+        transactionDto.description,
+        transactionDto.reference_number,
+        transactionDto.transaction_date,
+      ],
+    );
+    return {
+      message: 'Transaction recorded successfully',
+      data: results.rows,
+    };
   }
 
-  @Patch(':type/:id')
-  async updateContact(
-    @Param('type') type: string,
+  @Get(':id/statements')
+  async getAccountStatement(
     @Param('id') id: number,
-    @Body() payload: UpdateContactDto,
+    @Query('from') fromDate?: string,
+    @Query('to') toDate?: string,
   ) {
-    if (!['customer', 'vendor'].includes(type)) {
-      throw new BadRequestException('Type must be either customer or vendor');
+    let query = `
+      SELECT at.*, a.name as account_name
+      FROM account_transactions at
+      JOIN accounts a ON at.account_id = a.id
+      WHERE at.account_id = $1
+    `;
+    const params: any[] = [id];
+    let paramCount = 2;
+
+    if (fromDate) {
+      query += ` AND at.transaction_date >= $${paramCount}`;
+      params.push(fromDate);
+      paramCount++;
     }
 
-    // Check if contact exists
-    const existingContact = await this.dbService.query(
-      'SELECT * FROM contacts WHERE id = $1 AND type = $2',
-      [id, type],
+    if (toDate) {
+      query += ` AND at.transaction_date <= $${paramCount}`;
+      params.push(toDate);
+      paramCount++;
+    }
+
+    query += ' ORDER BY at.transaction_date DESC, at.created_at DESC';
+
+    const result = await this.dbService.query(query, params);
+
+    // Get account details
+    const accountResult = await this.dbService.query(
+      'SELECT * FROM accounts WHERE id = $1',
+      [id],
+    );
+    const calculationResult = await this.dbService.query(
+      `
+        SELECT
+          total_deposit,
+          total_withdrawal,
+          (total_deposit - total_withdrawal) AS balance
+        FROM (
+          SELECT
+            COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN amount END), 0) AS total_deposit,
+            COALESCE(SUM(CASE WHEN transaction_type = 'withdrawal' THEN amount END), 0) AS total_withdrawal
+          FROM account_transactions
+          WHERE account_id = $1
+        ) AS sub;
+      `,
+      [id],
     );
 
-    if (existingContact.rows.length === 0) {
-      throw new NotFoundException('Contact not found');
+    if (accountResult.rows.length === 0) {
+      throw new NotFoundException('Account not found');
     }
 
-    const updates: any[] = [];
-    const values: any[] = [];
-    let paramCount = 1;
-
-    Object.keys(payload).forEach((key) => {
-      if (payload[key] !== undefined) {
-        updates.push(`${key} = $${paramCount}`);
-        values.push(payload[key]);
-        paramCount++;
-      }
-    });
-
-    if (updates.length === 0) {
-      throw new BadRequestException('No fields to update');
-    }
-
-    updates.push(`updated_at = CURRENT_TIMESTAMP`);
-    values.push(id);
-
-    const result = await this.dbService.query(
-      `UPDATE contacts SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING *`,
-      values,
-    );
-
-    return { message: 'Contact updated successfully', data: result.rows[0] };
+    return {
+      account: accountResult.rows[0],
+      calculation: calculationResult.rows[0],
+      transactions: result.rows,
+    };
   }
 }

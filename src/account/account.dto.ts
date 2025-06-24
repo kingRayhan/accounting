@@ -1,26 +1,62 @@
-import { ApiProperty, PartialType } from '@nestjs/swagger';
-import { IsEmail, IsOptional, IsString } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
+import {
+  IsDateString,
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsPositive,
+  IsString,
+} from 'class-validator';
 
-// Contact DTOs
-export class CreateContactDto {
+// Account DTOs
+export class CreateAccountDto {
   @ApiProperty()
   @IsString()
   name: string;
 
-  @ApiProperty()
-  @IsOptional()
-  @IsEmail()
-  email?: string;
+  @ApiProperty({ enum: ['asset', 'liability', 'equity', 'revenue', 'expense'] })
+  @IsEnum(['asset', 'liability', 'equity', 'revenue', 'expense'])
+  account_type: string;
 
   @ApiProperty()
   @IsOptional()
   @IsString()
-  phone?: string;
+  account_subtype?: string;
 
   @ApiProperty()
   @IsOptional()
-  @IsString()
-  address?: string;
+  @IsNumber()
+  @Transform(({ value }) => parseFloat(value))
+  initial_balance?: number;
 }
 
-export class UpdateContactDto extends PartialType(CreateContactDto) {}
+export class AccountTransactionDto {
+  @ApiProperty()
+  @IsNumber()
+  account_id: number;
+
+  @ApiProperty({ enum: ['deposit', 'withdrawal'] })
+  @IsEnum(['deposit', 'withdrawal'])
+  transaction_type: 'deposit' | 'withdrawal';
+
+  @ApiProperty()
+  @IsNumber()
+  @IsPositive()
+  @Transform(({ value }) => parseFloat(value))
+  amount: number;
+
+  @ApiProperty()
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @ApiProperty()
+  @IsOptional()
+  @IsString()
+  reference_number?: string;
+
+  @ApiProperty()
+  @IsDateString()
+  transaction_date: string;
+}

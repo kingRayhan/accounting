@@ -1,5 +1,5 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
-import { Pool } from 'pg';
+import { Pool, QueryResult } from 'pg';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit {
@@ -21,13 +21,11 @@ export class DatabaseService implements OnModuleInit {
     }
   }
 
-  async transaction(
-    queries: Array<{ text: string; params?: any[] }>,
-  ): Promise<any[]> {
+  async transaction(queries: Array<{ text: string; params?: any[] }>) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const results: any[] = [];
+      const results: QueryResult[] = [];
 
       for (const query of queries) {
         const result = await client.query(query.text, query.params);
